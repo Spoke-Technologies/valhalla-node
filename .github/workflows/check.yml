@@ -1,0 +1,13 @@
+name: Check installer
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -v
+      - run: for file in bootstrap.sh setup.sh valhalla-node run-service.sh cloudflare-setup.sh; do bash -n "$file"; done
+      - run: shellcheck -e SC2034,SC1091 bootstrap.sh setup.sh valhalla-node run-service.sh cloudflare-setup.sh
+      - run: systemd-analyze verify valhalla-node.service

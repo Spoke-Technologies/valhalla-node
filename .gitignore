@@ -1,0 +1,7 @@
+__pycache__/
+.env
+*.part
+*.osm.pbf
+*.sqlite
+*.tar
+*token*

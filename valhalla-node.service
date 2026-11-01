@@ -1,0 +1,17 @@
+[Unit]
+Description=Spoke Valhalla Australia routing
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/valhalla-node/current/custom_files/valhalla_tiles.tar
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f spoke-valhalla
+ExecStart=/bin/bash /usr/local/lib/valhalla-node/run-service.sh
+ExecStop=/usr/bin/docker stop -t 35 spoke-valhalla
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
