@@ -1,9 +1,13 @@
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
 from pathlib import Path
 import subprocess
+import signal
+import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -53,6 +57,158 @@ class NodeTests(unittest.TestCase):
             node.activate(self.new, {'version': '3.8.3'}, {'matrix': []})
         self.assertEqual((self.root / 'current').resolve(), self.new)
         self.assertEqual((self.root / 'previous').resolve(), self.old)
+        self.assertFalse((self.root / 'activation.json').exists())
+
+    def interrupted_activation(self, first_install=False):
+        if first_install:
+            (self.root / 'current').unlink()
+        (self.new / 'custom_files').mkdir(exist_ok=True)
+        (self.new / 'custom_files/valhalla_tiles.tar').touch()
+        program = '''import os, signal, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import node
+node.ROOT = Path(sys.argv[2])
+def interrupted(*args, **kwargs):
+    os.kill(os.getpid(), signal.SIGTERM)
+node.run = interrupted
+node.activate(node.ROOT / 'releases/new', {}, {})
+'''
+        result = subprocess.run([sys.executable, '-c', program, str(Path(node.__file__).parent), str(self.root)])
+        self.assertEqual(result.returncode, -signal.SIGTERM)
+        self.assertTrue((self.root / 'activation.json').exists())
+
+    def boot_recovery(self):
+        program = '''import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import node
+node.ROOT = Path(sys.argv[2])
+node.os.geteuid = lambda: 0
+sys.argv = ['node.py', '_recover']
+node.main()
+'''
+        return subprocess.run([sys.executable, '-c', program, str(Path(node.__file__).parent), str(self.root)], capture_output=True)
+
+    def test_termination_preserves_fallback_and_boot_recovers_history(self):
+        earlier = self.root / 'releases/earlier'
+        earlier.mkdir()
+        node.set_link('previous', earlier)
+        (self.old / 'custom_files').mkdir()
+        (self.old / 'custom_files/valhalla_tiles.tar').touch()
+        self.interrupted_activation()
+        self.assertEqual((self.root / 'current').resolve(), self.new)
+        self.assertEqual((self.root / 'previous').resolve(), self.old)
+        self.assertEqual(self.boot_recovery().returncode, 0)
+        self.assertEqual((self.root / 'current').resolve(), self.old)
+        self.assertEqual((self.root / 'previous').resolve(), earlier)
+        self.assertFalse((self.root / 'activation.json').exists())
+        self.assertFalse(node.recover_activation())
+
+    def test_boot_recovery_skips_an_activation_that_still_holds_the_lock(self):
+        self.interrupted_activation()
+        with (self.root / 'update.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.boot_recovery().returncode, 0)
+        self.assertEqual((self.root / 'current').resolve(), self.new)
+        self.assertTrue((self.root / 'activation.json').exists())
+
+    def test_interrupted_first_install_stays_stopped_after_recovery(self):
+        self.interrupted_activation(first_install=True)
+        self.assertEqual(self.boot_recovery().returncode, 1)
+        self.assertFalse((self.root / 'current').is_symlink())
+        self.assertFalse((self.root / 'activation.json').exists())
+
+    def test_rollback_recovers_interruption_without_rolling_back_twice(self):
+        self.interrupted_activation()
+        with patch.object(sys, 'argv', ['node.py', 'rollback']), patch.object(node.os, 'geteuid', return_value=0), patch.object(node, 'run') as run, patch.object(node, 'wait_healthy'), patch.object(node, 'validate_candidate') as validate, contextlib.redirect_stdout(io.StringIO()):
+            node.main()
+        self.assertEqual((self.root / 'current').resolve(), self.old)
+        run.assert_called_once_with('systemctl', 'restart', node.SERVICE)
+        validate.assert_not_called()
+
+    def test_failed_activation_restores_existing_previous_pointer(self):
+        earlier = self.root / 'releases/earlier'
+        earlier.mkdir()
+        node.set_link('previous', earlier)
+        with patch.object(node, 'run'), patch.object(node, 'wait_healthy', side_effect=[RuntimeError('failed'), {}]):
+            with self.assertRaises(RuntimeError):
+                node.activate(self.new, {}, {})
+        self.assertEqual((self.root / 'current').resolve(), self.old)
+        self.assertEqual((self.root / 'previous').resolve(), earlier)
+        self.assertFalse((self.root / 'activation.json').exists())
+
+    @unittest.skipUnless(shutil.which('flock'), 'The installer requires Linux flock')
+    def test_installer_lock_blocks_mutation_during_an_update(self):
+        source = (Path(node.__file__).parent / 'setup.sh').read_text()
+        guard = source.split('exec 9>/opt/valhalla-node/update.lock', 1)[1].split('export DEBIAN_FRONTEND', 1)[0]
+        guard = 'exec 9>"$1/update.lock"\n' + guard + '\nprintf installed > "$1/mutated"\n'
+        with (self.root / 'update.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            blocked = subprocess.run(['bash', '-ec', guard, 'setup-test', str(self.root)], capture_output=True)
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertFalse((self.root / 'mutated').exists())
+        allowed = subprocess.run(['bash', '-ec', guard, 'setup-test', str(self.root)], capture_output=True)
+        self.assertEqual(allowed.returncode, 0)
+        self.assertEqual((self.root / 'mutated').read_text(), 'installed')
+
+    def test_invalid_status_fields_are_rejected(self):
+        good = {'version': '3.8.3', 'tileset_last_modified': 123}
+        self.assertEqual(node.validate_status(good), good)
+        for invalid in ({}, [], {'version': '3.8.3'}, dict(good, version='other'),
+                        dict(good, tileset_last_modified=0), dict(good, tileset_last_modified=True),
+                        dict(good, tileset_last_modified='123')):
+            with self.subTest(status=invalid), self.assertRaises(ValueError):
+                node.validate_status(invalid)
+
+    def run_public_probe(self, responder):
+        source = (Path(node.__file__).parent / 'cloudflare-setup.sh').read_text()
+        program = source.split('python3 - "$NODE_HOSTNAME" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['probe', 'node.example']), patch.object(sys, 'path', sys.path.copy()), patch.object(node, 'request_json', side_effect=responder), patch.object(node.time, 'sleep'), contextlib.redirect_stdout(output):
+            exec(compile(program, 'cloudflare-public-probe', 'exec'), {})
+        return output.getvalue()
+
+    @staticmethod
+    def public_response(base_url, path, payload=None):
+        if path == 'status':
+            return {'version': '3.8.3', 'tileset_last_modified': 123}
+        count = len(payload['sources'])
+        return {'sources_to_targets': [[{
+            'from_index': source, 'to_index': target,
+            'time': 0 if source == target else 5,
+            'distance': 0 if source == target else 1,
+        } for target in range(count)] for source in range(count)]}
+
+    def test_public_probe_rejects_empty_local_status(self):
+        with self.assertRaisesRegex(ValueError, 'healthy Valhalla'):
+            self.run_public_probe(lambda *args: {})
+
+    def test_public_probe_rejects_empty_remote_status(self):
+        def response(base_url, path, payload=None):
+            return {} if base_url.startswith('https:') else self.public_response(base_url, path, payload)
+        with self.assertRaisesRegex(ValueError, 'healthy Valhalla'):
+            self.run_public_probe(response)
+
+    def test_public_probe_rejects_different_remote_matrices(self):
+        def response(base_url, path, payload=None):
+            result = self.public_response(base_url, path, payload)
+            if base_url.startswith('https:') and path != 'status':
+                result['sources_to_targets'][0][1]['time'] = 99
+            return result
+        with self.assertRaisesRegex(ValueError, 'matrices differ'):
+            self.run_public_probe(response)
+
+    def test_public_probe_accepts_matching_valid_matrices(self):
+        self.assertIn('Public endpoint passed', self.run_public_probe(self.public_response))
+
+    def test_https_matrix_request_retains_url_and_payload(self):
+        with patch.object(node.urllib.request, 'urlopen', return_value=io.BytesIO(b'{}')) as fetch:
+            node.request_json('https://node.example', 'sources_to_targets', {'costing': 'bus'})
+        request = fetch.call_args.args[0]
+        self.assertEqual(request.full_url, 'https://node.example/sources_to_targets')
+        self.assertEqual(request.get_method(), 'POST')
+        self.assertEqual(json.loads(request.data), {'costing': 'bus'})
 
     def test_failed_activation_restores_old_release(self):
         failure = RuntimeError('new maps not healthy')

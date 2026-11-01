@@ -11,23 +11,27 @@ set -euo pipefail
 awk '/MemTotal/ {exit ($2 < 1800000)}' /proc/meminfo || {
   echo 'At least 2 GB RAM is required.' >&2; exit 1;
 }
+install -d -m 755 /opt/valhalla-node
+exec 9>/opt/valhalla-node/update.lock
+flock -n 9 || {
+  echo 'An install, update or rollback is running. Wait before re-running setup.' >&2
+  exit 1
+}
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
 apt-get update
 apt-get install -y ca-certificates curl python3
 if ! command -v docker >/dev/null; then apt-get install -y docker.io; fi
 systemctl enable --now docker
 [[ -x /usr/bin/docker ]] || { echo 'Expected Docker at /usr/bin/docker.' >&2; exit 1; }
-if systemctl is-active --quiet valhalla-map-update.service; then
-  echo 'A map update is already running. Wait for it before re-running setup.' >&2
-  exit 1
-fi
-
 source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 install -d -m 755 /usr/local/lib/valhalla-node /opt/valhalla-node/releases
 for file in node.py valhalla.json valhalla.env run-service.sh cloudflare-setup.sh; do
-  install -m 644 "$source_dir/$file" "/usr/local/lib/valhalla-node/$file"
+  install -m 644 "$source_dir/$file" "/usr/local/lib/valhalla-node/$file.new"
+  mv "/usr/local/lib/valhalla-node/$file.new" "/usr/local/lib/valhalla-node/$file"
 done
 install -m 755 "$source_dir/valhalla-node" /usr/local/bin/valhalla-node
 install -m 644 "$source_dir/valhalla-node.service" /etc/systemd/system/valhalla-node.service
 systemctl daemon-reload
+flock -u 9
+exec 9>&-
 valhalla-node update

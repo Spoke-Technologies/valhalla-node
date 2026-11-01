@@ -186,7 +186,7 @@ finish() {
 
 TOTAL_STAGES=4
 [[ $EUID -eq 0 && -t 0 ]] || { echo 'Run interactively: sudo valhalla-node cloudflare' >&2; exit 1; }
-curl --fail --silent --show-error http://127.0.0.1:8002/status >/dev/null
+valhalla-node test >/dev/null
 umask 077
 install -d -m 700 /etc/valhalla-node
 ENV_FILE=/etc/valhalla-node/cloudflare.env
@@ -260,16 +260,19 @@ pause "Press Enter after saving the route."
 stage "Test the public endpoint"
 say "Checking that the public hostname serves the same maps as this node."
 python3 - "$NODE_HOSTNAME" <<'PY'
-import json, sys, time, urllib.request
-def health(url):
-    with urllib.request.urlopen(url, timeout=15) as response:
-        return json.load(response)
-local = health('http://127.0.0.1:8002/status')
+import sys, time
+sys.path.insert(0, '/usr/local/lib/valhalla-node')
+from node import request_json, validate_status, matrices
+local = validate_status(request_json('http://127.0.0.1:8002', 'status'))
+expected = matrices()
+base_url = 'https://' + sys.argv[1]
 for attempt in range(12):
     try:
-        remote = health('https://' + sys.argv[1] + '/status')
+        remote = validate_status(request_json(base_url, 'status'))
         if remote.get('version') != local.get('version') or remote.get('tileset_last_modified') != local.get('tileset_last_modified'):
             raise ValueError('Hostname points to different maps/version')
+        if matrices(base_url) != expected:
+            raise ValueError('Public routing matrices differ from this node')
         break
     except Exception:
         if attempt == 11:

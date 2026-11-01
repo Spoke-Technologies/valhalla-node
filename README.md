@@ -36,7 +36,7 @@ Once local routing passes, run interactively:
 sudo valhalla-node cloudflare
 ```
 
-The wizard walks you through creating a tunnel and a **new hostname for each node**, installs `cloudflared` from Cloudflare's signed package repository, connects it, and tests the public endpoint. Your domain must already be on Cloudflare and you need permission to create tunnels/routes.
+The wizard first verifies local Valhalla status and routing matrices. It then walks you through creating a tunnel and a **new hostname for each node**, installs `cloudflared` from Cloudflare's signed package repository, connects it, and checks that the public endpoint has valid status fields and returns the same matrices as this node. Your domain must already be on Cloudflare and you need permission to create tunnels/routes.
 
 Use a new hostname such as `valhalla2.spoketech.net`, with an HTTP origin of **`127.0.0.1:8002`**. The wizard leaves existing tunnels/hostnames alone. It does not change application endpoints or set up a load balancer.
 
@@ -65,7 +65,9 @@ Each update:
 4. Starts an isolated candidate on localhost:18002 with a 512 MiB memory cap and checks eight auto/bus matrices across Brisbane, Gold Coast, Sydney and Melbourne (**86 pairs**).
 5. Switches the active release, restarts the service, and repeats the checks. Activation failure restores the previous release automatically. Map builds/checks failing earlier leave the current service running.
 
-Updates are manual. Activation causes a brief routing interruption. A process lock prevents concurrent builds and rollback. The background unit is `valhalla-map-update`; if it fails, inspect its journal and the newest release's build/validation logs, then retry `update`. An interrupted build is rebuilt from scratch on the next update.
+Updates are manual. Activation causes a brief routing interruption. Installation, updates and rollback share a process lock, so re-running setup during a build stops before installing packages or replacing files. The background unit is `valhalla-map-update`; if it fails, inspect its journal and the newest release's build/validation logs, then retry `update`. An interrupted build is rebuilt from scratch on the next update.
+
+Activation saves and syncs recovery state and the previous release before switching maps. An interrupted activation is rolled back before the next service start, update or rollback command. This also restores the earlier rollback history. If the **first installation** is interrupted during activation, there is no old release to restore: recovery leaves routing stopped and you should run `sudo valhalla-node update` again. A rollback command that recovers an interrupted activation stops after restoring the last active maps; it does not roll back twice.
 
 ```bash
 sudo valhalla-node status
@@ -75,7 +77,7 @@ sudo valhalla-node rollback
 
 Rollback validates the previous release before switching. `/opt/valhalla-node/current` and `previous` point to the active and last active releases. All release directories are retained, including failed builds, so an operator can inspect them. They consume several GB each: after checking these two symlink targets, manually remove older, unused directories in `/opt/valhalla-node/releases/` when needed. The updater refuses to start with less than 20 GiB free.
 
-The systemd routing service starts automatically after reboot. `status` shows the active map timestamp; `source.json` and `verification.json` in each release record the downloaded source and checks. The latest available map can lag today's date according to Geofabrik's publishing schedule.
+The systemd routing service starts automatically after reboot. Its container uses rotating local logs, capped at three 10 MB files. `status` shows the active map timestamp; `source.json` and `verification.json` in each release record the downloaded source and checks. The latest available map can lag today's date according to Geofabrik's publishing schedule.
 
 ## Files and validation
 
@@ -87,6 +89,6 @@ for file in bootstrap.sh setup.sh valhalla-node run-service.sh cloudflare-setup.
 shellcheck -e SC2034,SC1091 bootstrap.sh setup.sh valhalla-node run-service.sh cloudflare-setup.sh
 ```
 
-Tests cover checksum rejection, matrix validation, candidate failures, successful activation and rollback after failures. Unit tests passed on macOS and Linux; ShellCheck passed, and Cloudflare's signed package installation and token-file option were checked in a disposable Ubuntu 24.04 container. The build parameters and configuration were verified by a full Australia build and activation on the existing test VPS. The reusable installer still needs its first complete run on a fresh VPS; the Cloudflare wizard needs a human dashboard run. No throughput capacity is promised by these smoke checks.
+Tests cover checksum rejection, matrix/status validation, installer locking, candidate failures, successful activation, rollback after failures, real process termination and recovery on the next service start. They also execute the public-check code with valid and invalid local/remote responses. Unit tests run on Linux; macOS skips the Linux-only `flock` shell test. ShellCheck and Ubuntu systemd unit validation are included in CI. Cloudflare's signed package installation and token-file option were checked in a disposable Ubuntu 24.04 container. The build parameters and configuration were verified by a full Australia build and activation on the existing test VPS. The reusable installer still needs its first complete run on a fresh VPS; the Cloudflare wizard needs a human dashboard run. No throughput capacity is promised by these smoke checks.
 
 Map data: © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), distributed by Geofabrik under the ODbL. Preserve the required attribution in the application displaying/using this data. [Valhalla](https://github.com/valhalla/valhalla) and [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/) retain their own licensing/terms.

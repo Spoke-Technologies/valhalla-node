@@ -41,8 +41,20 @@ def run(*args, **kwargs):
 
 def write_json(path, data):
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(data, indent=2) + '\n')
+    with temporary.open('w') as stream:
+        stream.write(json.dumps(data, indent=2) + '\n')
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.replace(path)
+    sync_directory(path.parent)
+
+
+def sync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def digest(path):
@@ -77,9 +89,9 @@ def download_map(directory):
             'downloaded_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
 
 
-def request_json(port, path, payload=None):
+def request_json(base_url, path, payload=None):
     request = urllib.request.Request(
-        f'http://127.0.0.1:{port}/{path}',
+        f'{base_url}/{path}',
         data=None if payload is None else json.dumps(payload).encode(),
         headers={'Content-Type': 'application/json'},
     )
@@ -87,12 +99,18 @@ def request_json(port, path, payload=None):
         return json.load(response)
 
 
+def validate_status(status):
+    if (not isinstance(status, dict) or status.get('version') != '3.8.3'
+            or type(status.get('tileset_last_modified')) is not int
+            or status['tileset_last_modified'] <= 0):
+        raise ValueError('Endpoint is not a healthy Valhalla 3.8.3 map service')
+    return status
+
+
 def wait_healthy(port):
     for attempt in range(120):
         try:
-            status = request_json(port, 'status')
-            if status.get('version') == '3.8.3' and status.get('tileset_last_modified', 0) > 0:
-                return status
+            return validate_status(request_json(f'http://127.0.0.1:{port}', 'status'))
         except (OSError, ValueError):
             pass
         time.sleep(1)
@@ -116,12 +134,12 @@ def check_matrix(data, count):
     return rows
 
 
-def matrices(port):
+def matrices(base_url='http://127.0.0.1:8002'):
     results = {}
     for area, coordinates in AREAS.items():
         locations = [{'lat': lat, 'lon': lon} for lat, lon in coordinates]
         for costing in ('auto', 'bus'):
-            data = request_json(port, 'sources_to_targets', {
+            data = request_json(base_url, 'sources_to_targets', {
                 'sources': locations, 'targets': locations, 'costing': costing, 'units': 'kilometers',
             })
             results[f'{area}/{costing}'] = check_matrix(data, len(locations))
@@ -155,7 +173,7 @@ def validate_candidate(release, config):
             '--memory-swap=512m', '-p', '127.0.0.1:18002:8002', IMAGE, 'build_tiles',
             stdout=subprocess.DEVNULL)
         health = wait_healthy(18002)
-        results = matrices(18002)
+        results = matrices('http://127.0.0.1:18002')
         state = json.loads(run('docker', 'inspect', VERIFY, capture_output=True, text=True).stdout)[0]['State']
         if state['OOMKilled'] or not state['Running']:
             raise RuntimeError('Candidate container failed')
@@ -173,35 +191,64 @@ def set_link(name, target):
     temporary.unlink(missing_ok=True)
     temporary.symlink_to(target)
     temporary.replace(ROOT / name)
+    sync_directory(ROOT)
+
+
+def recover_activation():
+    pending = ROOT / 'activation.json'
+    if not pending.exists():
+        return False
+    state = json.loads(pending.read_text())
+    for name, target in (('current', state['old']), ('previous', state['previous'])):
+        if target is not None:
+            set_link(name, Path(target))
+        else:
+            (ROOT / name).unlink(missing_ok=True)
+            sync_directory(ROOT)
+    pending.unlink()
+    sync_directory(ROOT)
+    logging.warning('Recovered interrupted activation; restored the last active release')
+    return True
+
+
+def restart_recovered_service():
+    if (ROOT / 'current').is_symlink():
+        run('systemctl', 'restart', SERVICE)
+        wait_healthy(8002)
+    else:
+        run('systemctl', 'stop', SERVICE)
 
 
 def activate(release, expected_health, expected_matrices):
     current = ROOT / 'current'
     old = current.resolve() if current.is_symlink() else None
+    previous = ROOT / 'previous'
+    write_json(ROOT / 'activation.json', {
+        'old': str(old) if old else None,
+        'previous': str(previous.resolve()) if previous.is_symlink() else None,
+    })
     try:
+        if old and old != release:
+            set_link('previous', old)
         set_link('current', release)
         run('systemctl', 'enable', SERVICE, stdout=subprocess.DEVNULL)
         run('systemctl', 'restart', SERVICE)
-        if wait_healthy(8002) != expected_health or matrices(8002) != expected_matrices:
+        if wait_healthy(8002) != expected_health or matrices() != expected_matrices:
             raise RuntimeError('Activated service differs from validated candidate')
     except BaseException:
-        if old:
-            set_link('current', old)
-            run('systemctl', 'restart', SERVICE)
-            wait_healthy(8002)
-            logging.error('Activation failed; previous maps restored')
-        else:
-            run('systemctl', 'stop', SERVICE)
-            current.unlink(missing_ok=True)
+        recover_activation()
+        restart_recovered_service()
         raise
-    if old and old != release:
-        set_link('previous', old)
+    (ROOT / 'activation.json').unlink()
+    sync_directory(ROOT)
 
 
 def update():
     ROOT.mkdir(parents=True, exist_ok=True)
     with (ROOT / 'update.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if recover_activation():
+            restart_recovered_service()
         if shutil.disk_usage(ROOT).free < 20 * 1024**3:
             raise RuntimeError('Need at least 20 GiB free disk space for a staged Australia build')
         current_config = ROOT / 'current/custom_files/valhalla.json'
@@ -260,22 +307,33 @@ def update():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['update', 'status', 'test', 'rollback', 'cloudflare', 'image', '_update'])
+    parser.add_argument('command', choices=['update', 'status', 'test', 'rollback', 'cloudflare', 'image', '_update', '_recover'])
     command = parser.parse_args().command
     if command == 'image':
         print(IMAGE)
         return
     if command == 'test':
-        print(json.dumps(matrices(8002), indent=2))
+        validate_status(request_json('http://127.0.0.1:8002', 'status'))
+        print(json.dumps(matrices(), indent=2))
         return
     if command == 'status':
         print('Current:', (ROOT / 'current').resolve())
         print('Previous:', (ROOT / 'previous').resolve())
-        print(json.dumps(request_json(8002, 'status'), indent=2))
+        print(json.dumps(validate_status(request_json('http://127.0.0.1:8002', 'status')), indent=2))
         return
     if os.geteuid() != 0:
         parser.error('Run this command with sudo')
-    if command == 'cloudflare':
+    if command == '_recover':
+        with (ROOT / 'update.lock').open('w') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                recover_activation()
+            if not (ROOT / 'current/custom_files/valhalla_tiles.tar').exists():
+                sys.exit(1)
+    elif command == 'cloudflare':
         run('bash', LIB / 'cloudflare-setup.sh')
     elif command == 'update':
         run('systemd-run', '--unit=valhalla-map-update', '--collect', '--no-block',
@@ -285,6 +343,10 @@ def main():
     elif command == 'rollback':
         with (ROOT / 'update.lock').open('w') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if recover_activation():
+                restart_recovered_service()
+                print('Interrupted activation rolled back to the last active release')
+                return
             previous = ROOT / 'previous'
             if not previous.is_symlink():
                 raise RuntimeError('No previous release to restore')
