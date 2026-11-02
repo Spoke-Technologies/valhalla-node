@@ -1,0 +1,19 @@
+name: Build patched engine
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run engine regression
+        run: docker build -f engine/Dockerfile -t ghcr.io/spoke-technologies/valhalla-node:3.8.3-complex-edge-1 .
+      - name: Publish tested image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push ghcr.io/spoke-technologies/valhalla-node:3.8.3-complex-edge-1

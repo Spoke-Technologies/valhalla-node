@@ -1,0 +1,22 @@
+--- a/src/thor/costmatrix.cc
++++ b/src/thor/costmatrix.cc
+@@ -864,7 +864,7 @@
+   // Disallow connections that are part of a complex restriction.
+   // TODO - validate that we do not need to "walk" the paths forward
+   // and backward to see if they match a restriction.
+-  if (pred.on_complex_rest()) {
++  if (pred.on_complex_rest() && pred.predecessor() != kInvalidLabel) {
+     // TODO(nils): bidir a* is digging deeper
+     return;
+   }
+@@ -975,6 +975,10 @@
+                              max_iterations_, min_iterations_);
+       }
+     } else {
++      // Initial edges may connect on the same edge without traversing a restricted turn.
++      if (pred.on_complex_rest()) {
++        continue;
++      }
+       // at this point, the found connection might still be somewhat trivial:
+       // the connecting edge might be an initial edge for either the given source or target
+       // there are two things we need to take care of in that case: we have to make sure to

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="Spoke synthetic regression fixture">
+  <node id="1" lat="-27.5" lon="153.0" version="1"/>
+  <node id="2" lat="-27.5" lon="153.001" version="1"/>
+  <node id="3" lat="-27.5" lon="153.002" version="1"/>
+  <node id="4" lat="-27.499" lon="153.002" version="1"/>
+  <node id="5" lat="-27.499" lon="153.001" version="1"/>
+  <node id="6" lat="-27.501" lon="153.002" version="1"/>
+  <node id="7" lat="-27.501" lon="153.001" version="1"/>
+  <way id="11" version="1"><nd ref="1"/><nd ref="2"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="AB"/></way>
+  <way id="12" version="1"><nd ref="2"/><nd ref="3"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="BC"/></way>
+  <way id="13" version="1"><nd ref="3"/><nd ref="4"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="CD"/></way>
+  <way id="14" version="1"><nd ref="4"/><nd ref="5"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="DE"/></way>
+  <way id="15" version="1"><nd ref="5"/><nd ref="2"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="EB"/></way>
+  <way id="16" version="1"><nd ref="3"/><nd ref="6"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="CF"/></way>
+  <way id="17" version="1"><nd ref="6"/><nd ref="7"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="FG"/></way>
+  <way id="18" version="1"><nd ref="7"/><nd ref="2"/><tag k="highway" v="residential"/><tag k="oneway" v="yes"/><tag k="name" v="GB"/></way>
+  <relation id="100" version="1"><member type="way" ref="11" role="from"/><member type="way" ref="12" role="via"/><member type="way" ref="13" role="to"/><tag k="type" v="restriction"/><tag k="restriction" v="no_left_turn"/></relation>
+</osm>
