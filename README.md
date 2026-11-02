@@ -28,6 +28,10 @@ Detailed native build output is in `/opt/valhalla-node/releases/<release>/build.
 
 On a fresh machine, there is no routing service until the first download, build and validation finish. During this stage, `status` reports `Current: none`, the map job state and that the first build is in progress. It exits with status 1 until routing is ready; this alone does not mean the build failed. Check the journal for the actual build result. Ctrl-C while following the journal only closes the log viewer. `build.log` appears after the map download finishes, when tile construction starts.
 
+The journal reports the download starting, then received MiB, average speed and a percentage (when Geofabrik supplies a total size) every 30 seconds while data arrives. It reports checksum verification, tile construction, matrix validation and activation separately. While the tile build runs, it prints elapsed time and the latest build-log line every 30 seconds; a repeated line means that stage has not produced newer output, not that measurable progress has been confirmed. There is no overall build percentage because Valhalla does not supply one. Full build output remains in `build.log`. A stalled download can remain quiet until the network read times out (120 seconds).
+
+An update to the CLI does not add feedback to a process that is already running. For an existing build, check the map download size with `sudo ls -lh /opt/valhalla-node/releases/<release>/custom_files/australia-latest.osm.pbf*`, and follow `sudo tail -f /opt/valhalla-node/releases/<release>/build.log` once that file exists. Let the current build finish rather than restarting bootstrap for these logging improvements.
+
 This is a fresh-node installer, not an in-place migration tool for existing hand-managed Valhalla containers. It uses the names `spoke-valhalla`, `spoke-valhalla-build`, `spoke-valhalla-verify` and ports **8002 / 18002**. An occupied port stops the build before activation. Keep the old node and production hostname running until you have tested the new node from your application.
 
 ## Rename the VPS host

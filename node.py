@@ -26,6 +26,7 @@ ETC = Path('/etc')
 IMAGE = 'ghcr.io/valhalla/valhalla-scripted@sha256:24ef7955899dececb94e26c6dfb89d64fabfae875f980432694b0261eb6c251b'
 MAP_URL = 'https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf'
 MIN_MAP_BYTES = 100_000_000
+PROGRESS_INTERVAL = 30
 SERVICE = 'valhalla-node.service'
 BUILD = 'spoke-valhalla-build'
 VERIFY = 'spoke-valhalla-verify'
@@ -70,15 +71,30 @@ def digest(path):
 def download_map(directory):
     partial = directory / 'australia-latest.osm.pbf.part'
     md5, sha = hashlib.md5(), hashlib.sha256()
+    logging.info('Downloading Australia map: %s', MAP_URL)
+    started = reported = time.monotonic()
+    downloaded = 0
     with urllib.request.urlopen(MAP_URL, timeout=120) as response, partial.open('wb') as output:
         effective_url = response.geturl()
         parsed = urllib.parse.urlparse(effective_url)
         if parsed.scheme != 'https' or parsed.hostname != 'download.geofabrik.de':
             raise RuntimeError('Unexpected map download origin')
-        for chunk in iter(lambda: response.read(1024 * 1024), b''):
+        try:
+            total = max(0, int(response.headers.get('Content-Length', 0)))
+        except (TypeError, ValueError):
+            total = 0
+        for chunk in iter(lambda: response.read1(1024 * 1024), b''):
             output.write(chunk)
             md5.update(chunk)
             sha.update(chunk)
+            downloaded += len(chunk)
+            now = time.monotonic()
+            if now - reported >= PROGRESS_INTERVAL:
+                progress = f' / {total / 1024**2:.1f} MiB ({downloaded / total * 100:.1f}%)' if total else ''
+                logging.info('Map download: %.1f MiB%s, %.2f MiB/s', downloaded / 1024**2,
+                             progress, downloaded / 1024**2 / max(now - started, .001))
+                reported = now
+    logging.info('Download received: %.1f MiB; checking Geofabrik checksum', downloaded / 1024**2)
     # Use the resolved dated URL so a midnight latest-file rollover fails safely.
     with urllib.request.urlopen(effective_url + '.md5', timeout=30) as response:
         checksum = response.read(4096).decode().split()[0].lower()
@@ -87,8 +103,36 @@ def download_map(directory):
     if partial.stat().st_size < MIN_MAP_BYTES:
         raise RuntimeError('Australia download is unexpectedly small')
     partial.rename(directory / 'australia-latest.osm.pbf')
+    logging.info('Download verified: %.1f MiB; checksum matched', downloaded / 1024**2)
     return {'url': effective_url, 'md5': checksum, 'sha256': sha.hexdigest(),
             'downloaded_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+
+
+def run_build(log_path, *args):
+    command = [str(arg) for arg in args]
+    started = time.monotonic()
+    logging.info('Building Australia tiles; full output: %s', log_path)
+    with log_path.open('wb') as log, subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT) as process:
+        while True:
+            try:
+                code = process.wait(timeout=PROGRESS_INTERVAL)
+                break
+            except subprocess.TimeoutExpired:
+                try:
+                    with log_path.open('rb') as tail:
+                        tail.seek(0, os.SEEK_END)
+                        size = tail.tell()
+                        tail.seek(max(0, size - 4096))
+                        lines = tail.read().decode(errors='replace').splitlines()
+                    latest = lines[-1][-300:] if lines else 'waiting for build output'
+                except OSError:
+                    latest = 'build log currently unavailable'
+                logging.info('Australia tile build still running (%.1f min elapsed); latest output: %s',
+                             (time.monotonic() - started) / 60, latest)
+        if code:
+            raise subprocess.CalledProcessError(code, command)
+    logging.info('Australia tile build finished (%.1f min); checking output files',
+                 (time.monotonic() - started) / 60)
 
 
 def request_json(base_url, path, payload=None):
@@ -265,7 +309,8 @@ def update():
         release = ROOT / 'releases' / name
         directory = release / 'custom_files'
         directory.mkdir(parents=True)
-        logging.info('Building release %s; existing service stays online until activation', name)
+        logging.info('Preparing release %s; %s', name, 'existing service stays online until activation'
+                     if (ROOT / 'current').exists() else 'first setup: routing starts after build and validation')
         source = download_map(directory)
         write_json(release / 'source.json', source)
         build_config = copy.deepcopy(config)
@@ -277,11 +322,10 @@ def update():
             shutil.copy2(speeds, directory / speeds.name)
         remove_stopped(BUILD)
         try:
-            with (release / 'build.log').open('wb') as log:
-                logging.info('Build output: %s', release / 'build.log')
-                run(*container_args(BUILD, directory), '--cpus=1', '--memory=1g', '--memory-swap=1g',
-                    '--env', 'serve_tiles=False', '--env', 'use_tiles_ignore_pbf=False',
-                    '--env', 'server_threads=1', IMAGE, 'build_tiles', stdout=log, stderr=subprocess.STDOUT)
+            run_build(release / 'build.log', *container_args(BUILD, directory),
+                      '--cpus=1', '--memory=1g', '--memory-swap=1g',
+                      '--env', 'serve_tiles=False', '--env', 'use_tiles_ignore_pbf=False',
+                      '--env', 'server_threads=1', IMAGE, 'build_tiles')
             state = json.loads(run('docker', 'inspect', BUILD, capture_output=True, text=True).stdout)[0]['State']
             if state['OOMKilled'] or state['ExitCode'] != 0:
                 raise RuntimeError('Map build failed or exceeded memory limit')
@@ -301,6 +345,7 @@ def update():
         report = {'source': source, 'image': IMAGE, 'health': health, 'matrices': results,
                   'archive_sha256': digest(archive), 'activated': False}
         write_json(release / 'verification.json', report)
+        logging.info('Candidate checks passed; activating maps and repeating routing checks')
         activate(release, health, results)
         report['activated'] = True
         write_json(release / 'verification.json', report)

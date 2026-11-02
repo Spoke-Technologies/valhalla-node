@@ -20,6 +20,10 @@ import node
 
 
 class Response(io.BytesIO):
+    def __init__(self, content=b'', headers=None):
+        super().__init__(content)
+        self.headers = headers or {}
+
     def geturl(self):
         return 'https://download.geofabrik.de/australia-oceania/australia-261031.osm.pbf'
 
@@ -140,6 +144,50 @@ class NodeTests(unittest.TestCase):
                 node.download_map(self.new)
         self.assertFalse((self.new / 'australia-latest.osm.pbf').exists())
         self.assertEqual((self.root / 'current').resolve(), self.old)
+
+    def test_download_reports_percentage_and_verified_completion(self):
+        content = b'x' * (2 * 1024 * 1024)
+        checksum = hashlib.md5(content).hexdigest().encode()
+        with patch.object(node, 'MIN_MAP_BYTES', 1), patch.object(node.urllib.request, 'urlopen', side_effect=[
+            Response(content, {'Content-Length': str(len(content))}), Response(checksum)
+        ]), patch.object(node.time, 'monotonic', side_effect=range(0, 1000, 31)), self.assertLogs(level='INFO') as logs:
+            node.download_map(self.new)
+        output = '\n'.join(logs.output)
+        self.assertIn('Downloading Australia map', output)
+        self.assertIn('50.0%', output)
+        self.assertIn('100.0%', output)
+        self.assertIn('MiB/s', output)
+        self.assertIn('Download verified', output)
+
+    def test_download_without_valid_content_length_reports_bytes_without_percentage(self):
+        content = b'map fixture'
+        checksum = hashlib.md5(content).hexdigest().encode()
+        for length in (None, 'invalid', '0', '-1'):
+            headers = {} if length is None else {'Content-Length': length}
+            with self.subTest(length=length), patch.object(node, 'MIN_MAP_BYTES', 1), patch.object(
+                node.urllib.request, 'urlopen', side_effect=[Response(content, headers), Response(checksum)]
+            ), patch.object(node.time, 'monotonic', side_effect=range(0, 1000, 31)), self.assertLogs(level='INFO') as logs:
+                node.download_map(self.new)
+            output = '\n'.join(logs.output)
+            self.assertIn('MiB/s', output)
+            self.assertNotIn('%', output)
+            self.assertEqual((self.new / 'australia-latest.osm.pbf').read_bytes(), content)
+
+    def test_build_reports_liveness_and_keeps_full_stdout_and_stderr(self):
+        log = self.new / 'build.log'
+        program = "import sys,time; print('Parsing roads',flush=True); print('stderr detail',file=sys.stderr,flush=True); time.sleep(.2); print('Finished')"
+        with patch.object(node, 'PROGRESS_INTERVAL', .02), self.assertLogs(level='INFO') as logs:
+            node.run_build(log, sys.executable, '-c', program)
+        self.assertIn('still running', '\n'.join(logs.output))
+        self.assertIn('stderr detail', '\n'.join(logs.output))
+        self.assertEqual(log.read_text(), 'Parsing roads\nstderr detail\nFinished\n')
+
+    def test_build_failure_preserves_log_and_propagates_exit_code(self):
+        log = self.new / 'build.log'
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            node.run_build(log, sys.executable, '-c', "print('build failed'); raise SystemExit(7)")
+        self.assertEqual(error.exception.returncode, 7)
+        self.assertEqual(log.read_text(), 'build failed\n')
 
     def test_successful_activation_keeps_previous_release(self):
         with patch.object(node, 'run'), patch.object(node, 'wait_healthy', return_value={'version': '3.8.3'}), patch.object(node, 'matrices', return_value={'matrix': []}):
@@ -441,6 +489,7 @@ node.main()
             stack.enter_context(patch.object(node, 'download_map', return_value={'md5': 'fixture'}))
             stack.enter_context(patch.object(node, 'remove_stopped'))
             stack.enter_context(patch.object(node, 'run', side_effect=fake_run))
+            stack.enter_context(patch.object(node, 'run_build', side_effect=lambda log, *args: fake_run(*args)))
             stack.enter_context(patch.object(node.subprocess, 'run'))
             stack.enter_context(patch.object(node, 'validate_candidate', side_effect=RuntimeError('matrix failed')))
             with self.assertRaisesRegex(RuntimeError, 'matrix failed'):
