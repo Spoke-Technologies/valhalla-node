@@ -3,7 +3,11 @@ import fcntl
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import pty
+import re
+import select
 import subprocess
 import signal
 import shutil
@@ -209,6 +213,35 @@ node.main()
         self.assertEqual(request.full_url, 'https://node.example/sources_to_targets')
         self.assertEqual(request.get_method(), 'POST')
         self.assertEqual(json.loads(request.data), {'costing': 'bus'})
+
+    def test_wizard_banner_works_without_terminal_clear_capability(self):
+        source = (Path(node.__file__).parent / 'cloudflare-setup.sh').read_text()
+        library = source.split('# STAGES —', 1)[0]
+        prelude = source.split('banner "Connect this Valhalla node to Cloudflare"', 1)[0]
+        fallback = re.search(r'if ! tput clear[^\n]*\n.*?\nfi', prelude, re.S)
+        program = library + (fallback.group(0) if fallback else '') + '\nbanner "Test terminal"\nprintf "BANNER_PASSED\\n"\n'
+        binaries = self.root / 'bin'
+        binaries.mkdir()
+        tput = binaries / 'tput'
+        tput.write_text('#!/bin/sh\nexit 2\n')
+        tput.chmod(0o755)
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.Popen(['bash', '-ec', program], stdin=subprocess.PIPE,
+                stdout=slave, stderr=slave, env=dict(os.environ, TERM='dumb', PATH=str(binaries) + os.pathsep + os.environ['PATH']))
+            process.communicate(input=b'\n', timeout=5)
+            output = b''
+            while select.select([master], [], [], .1)[0]:
+                chunk = os.read(master, 4096)
+                if not chunk:
+                    break
+                output += chunk
+            self.assertEqual(process.returncode, 0, output.decode(errors='replace'))
+            self.assertIn(b'BANNER_PASSED', output)
+        finally:
+            os.close(master)
+            if slave is not None:
+                os.close(slave)
 
     def test_failed_activation_restores_old_release(self):
         failure = RuntimeError('new maps not healthy')

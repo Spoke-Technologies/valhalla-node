@@ -187,6 +187,10 @@ finish() {
 TOTAL_STAGES=4
 [[ $EUID -eq 0 && -t 0 ]] || { echo 'Run interactively: sudo valhalla-node cloudflare' >&2; exit 1; }
 valhalla-node test >/dev/null
+# Some SSH clients provide a TTY without a clear-screen capability.
+if ! tput clear >/dev/null 2>&1; then
+  _clear() { :; }
+fi
 umask 077
 install -d -m 700 /etc/valhalla-node
 ENV_FILE=/etc/valhalla-node/cloudflare.env
