@@ -28,6 +28,16 @@ Detailed native build output is in `/opt/valhalla-node/releases/<release>/build.
 
 This is a fresh-node installer, not an in-place migration tool for existing hand-managed Valhalla containers. It uses the names `spoke-valhalla`, `spoke-valhalla-build`, `spoke-valhalla-verify` and ports **8002 / 18002**. An occupied port stops the build before activation. Keep the old node and production hostname running until you have tested the new node from your application.
 
+## Rename the VPS host
+
+```bash
+sudo valhalla-node rename-host valhalla-qld-2
+```
+
+Use a short hostname with 1–63 lowercase letters, digits or hyphens, starting and ending with a letter or digit. `localhost` and numeric-only names are rejected. The command applies the name immediately with `hostnamectl`, updates matching loopback aliases in `/etc/hosts` (adding an entry if needed), and saves a cloud-init override when cloud-init is installed so the name survives reboot. Reconnect SSH to see the new name in your shell prompt; no reboot is required.
+
+This names the Ubuntu host. Cloudflare tunnel names, public DNS hostnames, and the VPS name in your provider's dashboard are managed separately. Existing installations need the updated CLI: in a checkout of this repository, run `git pull` and `sudo install -m 644 node.py /usr/local/lib/valhalla-node/node.py`. This refreshes the command without starting a map build.
+
 ## Connect Cloudflare
 
 Once local routing passes, run interactively:

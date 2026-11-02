@@ -15,12 +15,14 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
 
 ROOT = Path('/opt/valhalla-node')
 LIB = Path('/usr/local/lib/valhalla-node')
+ETC = Path('/etc')
 IMAGE = 'ghcr.io/valhalla/valhalla-scripted@sha256:24ef7955899dececb94e26c6dfb89d64fabfae875f980432694b0261eb6c251b'
 MAP_URL = 'https://download.geofabrik.de/australia-oceania/australia-latest.osm.pbf'
 MIN_MAP_BYTES = 100_000_000
@@ -305,10 +307,56 @@ def update():
         logging.info('Update passed and activated: %s. Previous maps retained.', name)
 
 
+def rename_host(name):
+    if (not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', name)
+            or name == 'localhost' or name.isdecimal()):
+        raise ValueError('Use a hostname of 1–63 lowercase letters, digits or hyphens; '
+                         'start/end with a letter or digit. localhost and numeric-only names are reserved.')
+    old = socket.gethostname()
+    old_names = {old, old.split('.')[0]} - {'localhost', 'localhost.localdomain'}
+    hosts = ETC / 'hosts'
+    lines, found = [], False
+    for line in hosts.read_text().splitlines(keepends=True):
+        body, comment, tail = line.partition('#')
+        fields = body.split()
+        if fields and fields[0] in ('127.0.0.1', '127.0.1.1', '::1'):
+            body = re.sub(r'\S+', lambda match: name if match[0] in old_names else match[0], body)
+            found = found or name in body.split()[1:]
+        lines.append(body + comment + tail)
+    contents = ''.join(lines)
+    if not found:
+        contents += ('' if not contents or contents.endswith('\n') else '\n') + f'127.0.1.1\t{name}\n'
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=hosts.parent, prefix='.valhalla-hosts-', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(hosts.stat().st_mode & 0o777)
+        run('hostnamectl', 'set-hostname', name)
+        temporary.replace(hosts)
+        cloud = ETC / 'cloud/cloud.cfg.d'
+        if cloud.is_dir():
+            # Explicit names also keep cloud-init's managed hosts template off the old metadata name.
+            write_json(cloud / '99-valhalla-hostname.cfg', {
+                'preserve_hostname': True, 'hostname': name, 'fqdn': name,
+            })
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    print(f'Hostname changed from {old} to {name}. Reconnect SSH to refresh the shell prompt.')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['update', 'status', 'test', 'rollback', 'cloudflare', 'image', '_update', '_recover'])
-    command = parser.parse_args().command
+    commands = parser.add_subparsers(dest='command', required=True)
+    for name in ('update', 'status', 'test', 'rollback', 'cloudflare', 'image', '_update', '_recover'):
+        commands.add_parser(name)
+    rename = commands.add_parser('rename-host', help='Rename this Ubuntu VPS hostname (requires sudo)')
+    rename.add_argument('hostname', help='New short hostname, e.g. valhalla-qld-2')
+    args = parser.parse_args()
+    command = args.command
     if command == 'image':
         print(IMAGE)
         return
@@ -323,7 +371,9 @@ def main():
         return
     if os.geteuid() != 0:
         parser.error('Run this command with sudo')
-    if command == '_recover':
+    if command == 'rename-host':
+        rename_host(args.hostname)
+    elif command == '_recover':
         with (ROOT / 'update.lock').open('w') as lock:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

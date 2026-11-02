@@ -38,6 +38,80 @@ class NodeTests(unittest.TestCase):
         self.new.mkdir()
         node.set_link('current', self.old)
 
+    def test_rename_host_preserves_other_hosts_entries_and_cloud_config(self):
+        etc = self.root / 'etc'
+        cloud = etc / 'cloud/cloud.cfg.d'
+        cloud.mkdir(parents=True)
+        existing = cloud / '50-provider.cfg'
+        existing.write_text('manage_etc_hosts: true\n')
+        hosts = etc / 'hosts'
+        hosts.write_text('127.0.0.1\tlocalhost\n'
+                         '127.0.1.1 old.example.com old other-alias # old stays in comment\n'
+                         '::1 localhost ip6-localhost old\n'
+                         '10.0.0.2 old remote-alias\n')
+        hosts.chmod(0o644)
+        with patch.object(node, 'ETC', etc), patch.object(node.socket, 'gethostname', return_value='old.example.com'), patch.object(node, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+            node.rename_host('valhalla-qld-2')
+        run.assert_called_once_with('hostnamectl', 'set-hostname', 'valhalla-qld-2')
+        expected = ('127.0.0.1\tlocalhost\n'
+                    '127.0.1.1 valhalla-qld-2 valhalla-qld-2 other-alias # old stays in comment\n'
+                    '::1 localhost ip6-localhost valhalla-qld-2\n'
+                    '10.0.0.2 old remote-alias\n')
+        self.assertEqual(hosts.read_text(), expected)
+        self.assertEqual(hosts.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(existing.read_text(), 'manage_etc_hosts: true\n')
+        self.assertEqual(json.loads((cloud / '99-valhalla-hostname.cfg').read_text()), {
+            'preserve_hostname': True, 'hostname': 'valhalla-qld-2', 'fqdn': 'valhalla-qld-2',
+        })
+        with patch.object(node, 'ETC', etc), patch.object(node.socket, 'gethostname', return_value='valhalla-qld-2'), patch.object(node, 'run'), contextlib.redirect_stdout(io.StringIO()):
+            node.rename_host('valhalla-qld-2')
+        self.assertEqual(hosts.read_text(), expected)
+        self.assertFalse(list(etc.glob('.valhalla-hosts-*')))
+
+    def test_rename_host_adds_resolution_without_cloud_init_or_replacing_localhost(self):
+        etc = self.root / 'etc'
+        etc.mkdir()
+        hosts = etc / 'hosts'
+        hosts.write_text('127.0.0.1 localhost # retain localhost')
+        with patch.object(node, 'ETC', etc), patch.object(node.socket, 'gethostname', return_value='localhost'), patch.object(node, 'run'), contextlib.redirect_stdout(io.StringIO()):
+            node.rename_host('a')
+        self.assertEqual(hosts.read_text(), '127.0.0.1 localhost # retain localhost\n127.0.1.1\ta\n')
+        self.assertFalse((etc / 'cloud').exists())
+
+    def test_invalid_hostnames_cannot_run_commands_or_touch_files(self):
+        for name in ('', '-bad', 'bad-', 'Bad', 'bad.name', 'two words', 'a_b', 'x' * 64,
+                     'localhost', '123', 'node\n', 'a;touch /tmp/no', '--help'):
+            with self.subTest(name=name), patch.object(node, 'ETC', self.root / 'missing'), patch.object(node, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'Use a hostname'):
+                    node.rename_host(name)
+                run.assert_not_called()
+
+    def test_hostnamectl_failure_does_not_change_hosts_or_cloud_config(self):
+        etc = self.root / 'etc'
+        cloud = etc / 'cloud/cloud.cfg.d'
+        cloud.mkdir(parents=True)
+        hosts = etc / 'hosts'
+        hosts.write_text('127.0.1.1 old\n')
+        with patch.object(node, 'ETC', etc), patch.object(node.socket, 'gethostname', return_value='old'), patch.object(node, 'run', side_effect=subprocess.CalledProcessError(1, ['hostnamectl'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                node.rename_host('x' * 63)
+        self.assertEqual(hosts.read_text(), '127.0.1.1 old\n')
+        self.assertFalse(list(cloud.iterdir()))
+        self.assertFalse(list(etc.glob('.valhalla-hosts-*')))
+
+    def test_rename_host_cli_dispatch_requires_root_and_name(self):
+        with patch.object(sys, 'argv', ['node.py', 'rename-host', 'valhalla-qld-2']), patch.object(node.os, 'geteuid', return_value=0), patch.object(node, 'rename_host') as rename:
+            node.main()
+            rename.assert_called_once_with('valhalla-qld-2')
+        for argv, uid in ((['node.py', 'rename-host', 'valhalla-qld-2'], 1000),
+                          (['node.py', 'rename-host'], 0),
+                          (['node.py', 'status', 'unexpected-name'], 0)):
+            with self.subTest(argv=argv, uid=uid), patch.object(sys, 'argv', argv), patch.object(node.os, 'geteuid', return_value=uid), patch.object(node, 'rename_host') as rename, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    node.main()
+                self.assertEqual(error.exception.code, 2)
+                rename.assert_not_called()
+
     def test_download_uses_dated_checksum_and_verifies_content(self):
         content = b'Australian map fixture'
         checksum = hashlib.md5(content).hexdigest().encode() + b'  australia.osm.pbf\n'
