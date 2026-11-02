@@ -26,6 +26,8 @@ valhalla-node test
 
 Detailed native build output is in `/opt/valhalla-node/releases/<release>/build.log`. The successful job ends with `Update passed and activated`. The clean installation, downloads, Australia build and activation took about **45 minutes** on the tested 2 GB / 2 vCPU VPS; allow longer on slower hosts.
 
+On a fresh machine, there is no routing service until the first download, build and validation finish. During this stage, `status` reports `Current: none`, the map job state and that the first build is in progress. It exits with status 1 until routing is ready; this alone does not mean the build failed. Check the journal for the actual build result. Ctrl-C while following the journal only closes the log viewer. `build.log` appears after the map download finishes, when tile construction starts.
+
 This is a fresh-node installer, not an in-place migration tool for existing hand-managed Valhalla containers. It uses the names `spoke-valhalla`, `spoke-valhalla-build`, `spoke-valhalla-verify` and ports **8002 / 18002**. An occupied port stops the build before activation. Keep the old node and production hostname running until you have tested the new node from your application.
 
 ## Rename the VPS host

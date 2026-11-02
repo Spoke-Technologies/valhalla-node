@@ -365,9 +365,35 @@ def main():
         print(json.dumps(matrices(), indent=2))
         return
     if command == 'status':
-        print('Current:', (ROOT / 'current').resolve())
-        print('Previous:', (ROOT / 'previous').resolve())
-        print(json.dumps(validate_status(request_json('http://127.0.0.1:8002', 'status')), indent=2))
+        for name in ('current', 'previous'):
+            path = ROOT / name
+            print(f'{name.title()}:', path.resolve() if path.exists() else 'none')
+        unit = subprocess.run(['systemctl', 'show', 'valhalla-map-update.service',
+                              '--property=LoadState,ActiveState,SubState,Result'],
+                             capture_output=True, text=True, timeout=5)
+        properties = dict(line.split('=', 1) for line in unit.stdout.splitlines() if '=' in line)
+        state = properties.get('ActiveState', 'unknown')
+        if properties.get('LoadState') == 'not-found':
+            print('Map update: not running')
+        elif unit.returncode:
+            print('Map update: unknown; inspect the journal')
+        else:
+            print(f'Map update: {state}/{properties.get("SubState", "unknown")} '
+                  f'(result: {properties.get("Result", "unknown")})')
+        if not (ROOT / 'current').exists():
+            if not unit.returncode and state in ('active', 'activating', 'reloading'):
+                print('No active maps yet; the first Australia map build is still in progress. Routing is not ready.')
+            else:
+                print('No active maps. Check the map update journal for completion or failure.')
+            print('Follow: sudo journalctl -fu valhalla-map-update')
+            sys.exit(1)
+        try:
+            print(json.dumps(validate_status(request_json('http://127.0.0.1:8002', 'status')), indent=2))
+        except (OSError, ValueError) as error:
+            print(f'Routing is not ready: {error}')
+            print('Inspect: sudo journalctl -u valhalla-node -n 50 --no-pager')
+            print('Map build/activation: sudo journalctl -u valhalla-map-update -n 50 --no-pager')
+            sys.exit(1)
         return
     if os.geteuid() != 0:
         parser.error('Run this command with sudo')

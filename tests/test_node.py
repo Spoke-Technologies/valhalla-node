@@ -250,6 +250,58 @@ node.main()
             with self.subTest(status=invalid), self.assertRaises(ValueError):
                 node.validate_status(invalid)
 
+    def test_status_reports_initial_build_without_calling_unstarted_api(self):
+        (self.root / 'current').unlink()
+        unit = subprocess.CompletedProcess([], 0, stdout='LoadState=loaded\nActiveState=activating\nSubState=start\nResult=success\n')
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['node.py', 'status']), patch.object(node.subprocess, 'run', return_value=unit), patch.object(node, 'request_json', side_effect=ConnectionRefusedError()) as request, contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as error:
+                node.main()
+        self.assertEqual(error.exception.code, 1)
+        request.assert_not_called()
+        self.assertIn('Current: none', output.getvalue())
+        self.assertIn('first Australia map build is still in progress', output.getvalue())
+        self.assertIn('journalctl -fu valhalla-map-update', output.getvalue())
+
+    def test_status_distinguishes_failed_or_absent_build_from_building(self):
+        (self.root / 'current').unlink()
+        for properties, expected in (
+            ('LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\n', 'failed'),
+            ('LoadState=not-found\nActiveState=inactive\nSubState=dead\n', 'not running'),
+        ):
+            output = io.StringIO()
+            unit = subprocess.CompletedProcess([], 0, stdout=properties)
+            with self.subTest(properties=properties), patch.object(sys, 'argv', ['node.py', 'status']), patch.object(node.subprocess, 'run', return_value=unit), patch.object(node, 'request_json') as request, contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit) as error:
+                    node.main()
+            self.assertEqual(error.exception.code, 1)
+            request.assert_not_called()
+            self.assertIn(expected, output.getvalue())
+            self.assertIn('No active maps', output.getvalue())
+            self.assertNotIn('still in progress', output.getvalue())
+
+    def test_status_still_checks_active_routing_when_map_update_failed(self):
+        unit = subprocess.CompletedProcess([], 0, stdout='LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=exit-code\n')
+        health = {'version': '3.8.3', 'tileset_last_modified': 123}
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['node.py', 'status']), patch.object(node.subprocess, 'run', return_value=unit), patch.object(node, 'request_json', return_value=health) as request, contextlib.redirect_stdout(output):
+            node.main()
+        request.assert_called_once_with('http://127.0.0.1:8002', 'status')
+        self.assertIn(str(self.old), output.getvalue())
+        self.assertIn('failed', output.getvalue())
+        self.assertIn('"tileset_last_modified": 123', output.getvalue())
+
+    def test_status_reports_unavailable_or_invalid_active_api_without_traceback(self):
+        unit = subprocess.CompletedProcess([], 0, stdout='LoadState=not-found\nActiveState=inactive\nSubState=dead\n')
+        for failure in (ConnectionRefusedError('Connection refused'), ValueError('Invalid status')):
+            output = io.StringIO()
+            with self.subTest(failure=failure), patch.object(sys, 'argv', ['node.py', 'status']), patch.object(node.subprocess, 'run', return_value=unit), patch.object(node, 'request_json', side_effect=failure), contextlib.redirect_stdout(output):
+                with self.assertRaises(SystemExit) as error:
+                    node.main()
+            self.assertEqual(error.exception.code, 1)
+            self.assertIn('Routing is not ready:', output.getvalue())
+            self.assertIn('journalctl -u valhalla-node', output.getvalue())
+
     def run_public_probe(self, responder):
         source = (Path(node.__file__).parent / 'cloudflare-setup.sh').read_text()
         program = source.split('python3 - "$NODE_HOSTNAME" <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
