@@ -93,7 +93,7 @@ def request_json(base_url, path, payload=None):
     request = urllib.request.Request(
         f'{base_url}/{path}',
         data=None if payload is None else json.dumps(payload).encode(),
-        headers={'Content-Type': 'application/json'},
+        headers={'Content-Type': 'application/json', 'User-Agent': 'valhalla-node/1.0'},
     )
     with urllib.request.urlopen(request, timeout=45 if payload else 3) as response:
         return json.load(response)

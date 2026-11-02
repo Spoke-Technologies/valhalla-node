@@ -49,6 +49,17 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(result['sha256'], hashlib.sha256(content).hexdigest())
         self.assertEqual((self.new / 'australia-latest.osm.pbf').read_bytes(), content)
 
+    def test_api_requests_identify_the_cli_to_cloudflare(self):
+        for payload in (None, {'costing': 'bus'}):
+            with self.subTest(payload=payload), patch.object(
+                node.urllib.request, 'urlopen', return_value=Response(b'{"ok": true}')
+            ) as fetch:
+                self.assertEqual(node.request_json('https://node.example', 'status', payload), {'ok': True})
+                request = fetch.call_args.args[0]
+                self.assertEqual(request.get_header('User-agent'), 'valhalla-node/1.0')
+                self.assertEqual(request.get_header('Content-type'), 'application/json')
+                self.assertEqual(request.get_method(), 'GET' if payload is None else 'POST')
+
     def test_bad_download_never_gets_promoted(self):
         with patch.object(node.urllib.request, 'urlopen', side_effect=[Response(b'broken'), Response(b'0' * 32)]):
             with self.assertRaisesRegex(RuntimeError, 'MD5 mismatch'):
